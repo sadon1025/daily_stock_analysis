@@ -317,6 +317,185 @@ class NotificationService(
         self._history_compare_cache[cache_key] = history_by_code
         return {"history_by_code": history_by_code}
 
+    @staticmethod
+    def _stock_push_text(value: Any, *, max_length: int = 240, max_items: int = 3) -> str:
+        """Format one stock-only push field without expanding large tables."""
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for item in value:
+                text = NotificationService._stock_push_text(
+                    item,
+                    max_length=max(40, max_length // max_items),
+                    max_items=max_items,
+                )
+                if text:
+                    parts.append(text)
+                if len(parts) >= max_items:
+                    break
+            return "；".join(parts)[:max_length]
+        if isinstance(value, dict):
+            parts = []
+            for key, item in value.items():
+                text = NotificationService._stock_push_text(
+                    item,
+                    max_length=max(40, max_length // max_items),
+                    max_items=max_items,
+                )
+                if text:
+                    parts.append(f"{key}: {text}")
+                if len(parts) >= max_items:
+                    break
+            return "；".join(parts)[:max_length]
+        return sanitize_diagnostic_text(str(value).strip())[:max_length]
+
+    def _stock_push_decision_signal(self, result: AnalysisResult) -> str:
+        summary = getattr(result, "decision_signal_summary", None)
+        if not isinstance(summary, dict) or not summary:
+            return ""
+
+        parts = []
+        action = self._stock_push_text(summary.get("action_label") or summary.get("action"), max_length=32)
+        horizon = self._stock_push_text(summary.get("horizon"), max_length=16)
+        report_id = self._stock_push_text(summary.get("source_report_id"), max_length=24)
+        reason = self._stock_push_text(summary.get("reason"), max_length=180)
+        if action:
+            parts.append(f"动作 {action}")
+        if horizon:
+            parts.append(f"周期 {horizon}")
+        if report_id:
+            parts.append(f"报告 #{report_id}")
+        if reason:
+            parts.append(f"理由：{reason}")
+        return "；".join(parts)
+
+    def _stock_push_section(self, result: AnalysisResult, report_language: str) -> List[str]:
+        signal_text, signal_emoji, _ = self._get_signal_level(result)
+        dashboard = result.dashboard if hasattr(result, "dashboard") and result.dashboard else {}
+        core = dashboard.get("core_conclusion", {}) if dashboard else {}
+        intel = dashboard.get("intelligence", {}) if dashboard else {}
+        battle = dashboard.get("battle_plan", {}) if dashboard else {}
+        sniper = battle.get("sniper_points", {}) if battle else {}
+        position = battle.get("position_strategy", {}) if battle else {}
+        decision_summary = getattr(result, "decision_signal_summary", None)
+        decision_summary = decision_summary if isinstance(decision_summary, dict) else {}
+
+        risk_items = []
+        for value in (
+            decision_summary.get("risk_summary"),
+            intel.get("risk_alerts") if isinstance(intel, dict) else None,
+            getattr(result, "risk_warning", None),
+        ):
+            text = self._stock_push_text(value, max_length=220)
+            if text and text not in risk_items:
+                risk_items.append(text)
+
+        position_items = []
+        suggested_position = position.get("suggested_position") if isinstance(position, dict) else None
+        if suggested_position:
+            position_items.append(f"建议仓位：{self._stock_push_text(suggested_position, max_length=80)}")
+        pos_advice = core.get("position_advice", {}) if isinstance(core, dict) else {}
+        if isinstance(pos_advice, dict):
+            no_position = self._stock_push_text(pos_advice.get("no_position"), max_length=90)
+            has_position = self._stock_push_text(pos_advice.get("has_position"), max_length=90)
+            if no_position:
+                position_items.append(f"空仓：{no_position}")
+            if has_position:
+                position_items.append(f"持仓：{has_position}")
+        entry_plan = self._stock_push_text(
+            position.get("entry_plan") if isinstance(position, dict) else None,
+            max_length=100,
+        )
+        if entry_plan:
+            position_items.append(f"建仓：{entry_plan}")
+
+        stock_name = self._get_display_name(result, report_language)
+        fields = [
+            ("股票评分", self._stock_push_text(getattr(result, "sentiment_score", None), max_length=24)),
+            ("趋势判断", localize_trend_prediction(result.trend_prediction, report_language)),
+            ("操作建议", localize_operation_advice(result.operation_advice, report_language)),
+            ("AI 决策信号", self._stock_push_decision_signal(result) or signal_text),
+            ("观察条件", self._stock_push_text(decision_summary.get("watch_conditions"), max_length=220)),
+            ("风险提示", "；".join(risk_items)[:260]),
+            (
+                "舆情情绪",
+                self._stock_push_text(
+                    intel.get("sentiment_summary") if isinstance(intel, dict) else None,
+                    max_length=180,
+                ),
+            ),
+            (
+                "业绩预期",
+                self._stock_push_text(
+                    intel.get("earnings_outlook") if isinstance(intel, dict) else None,
+                    max_length=180,
+                ),
+            ),
+            (
+                "利好催化",
+                self._stock_push_text(
+                    intel.get("positive_catalysts") if isinstance(intel, dict) else None,
+                    max_length=220,
+                ),
+            ),
+            (
+                "最新动态",
+                self._stock_push_text(
+                    intel.get("latest_news") if isinstance(intel, dict) else None,
+                    max_length=220,
+                ),
+            ),
+            (
+                "止损位",
+                self._stock_push_text(
+                    sniper.get("stop_loss") if isinstance(sniper, dict) else None,
+                    max_length=100,
+                ),
+            ),
+            (
+                "目标位",
+                self._stock_push_text(
+                    sniper.get("take_profit") if isinstance(sniper, dict) else None,
+                    max_length=100,
+                ),
+            ),
+            ("仓位建议", "；".join(position_items)[:260]),
+        ]
+
+        lines = [f"## {signal_emoji} {stock_name} ({result.code})"]
+        for label, value in fields:
+            lines.append(f"- {label}：{value or '暂无'}")
+        lines.extend(["", "---", ""])
+        return lines
+
+    def generate_stock_only_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+    ) -> str:
+        """Generate the stock-only push requested for automated notifications."""
+        if report_date is None:
+            report_date = datetime.now().strftime("%Y-%m-%d")
+        if not results:
+            return f"# 🎯 {report_date} 个股信息推送\n\n暂无个股分析结果"
+
+        report_language = self._get_report_language(results)
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+        buy_count = sum(1 for r in results if getattr(r, "decision_type", "") == "buy")
+        sell_count = sum(1 for r in results if getattr(r, "decision_type", "") == "sell")
+        hold_count = sum(1 for r in results if getattr(r, "decision_type", "") in ("hold", ""))
+
+        lines = [
+            f"# 🎯 {report_date} 个股信息推送",
+            "",
+            f"> 共分析 **{len(results)}** 只股票 | 买入:{buy_count} 观望:{hold_count} 卖出:{sell_count}",
+            "",
+        ]
+        for result in sorted_results:
+            lines.extend(self._stock_push_section(result, report_language))
+        return "\n".join(lines).rstrip()
+
     def generate_aggregate_report(
         self,
         results: List[AnalysisResult],
@@ -324,10 +503,7 @@ class NotificationService(
         report_date: Optional[str] = None,
     ) -> str:
         """Generate the aggregate report content used by merge/save/push paths."""
-        normalized_type = self._normalize_report_type(report_type)
-        if normalized_type == ReportType.BRIEF:
-            return self.generate_brief_report(results, report_date=report_date)
-        return self.generate_dashboard_report(results, report_date=report_date)
+        return self.generate_stock_only_report(results, report_date=report_date)
 
     def _collect_models_used(self, results: List[AnalysisResult]) -> List[str]:
         if not self._should_show_llm_model():
@@ -1364,6 +1540,11 @@ class NotificationService(
         Returns:
             精简版决策仪表盘
         """
+        return self.generate_stock_only_report(
+            results,
+            report_date=datetime.now().strftime('%Y-%m-%d'),
+        )
+
         config = get_config()
         report_language = self._get_report_language(results)
         labels = get_report_labels(report_language)
@@ -1679,6 +1860,11 @@ class NotificationService(
         Returns:
             Markdown 格式的单股报告
         """
+        return self.generate_stock_only_report(
+            [result],
+            report_date=datetime.now().strftime('%Y-%m-%d %H:%M'),
+        )
+
         report_date = datetime.now().strftime('%Y-%m-%d %H:%M')
         report_language = self._get_report_language(result)
         labels = get_report_labels(report_language)
