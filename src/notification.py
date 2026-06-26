@@ -370,6 +370,11 @@ class NotificationService(
             parts.append(f"理由：{reason}")
         return "；".join(parts)
 
+    @staticmethod
+    def _stock_push_line(label: str, value: Any) -> str:
+        text = str(value).strip() if value not in (None, "") else ""
+        return f"- {label}：{text or '暂无'}"
+
     def _stock_push_section(self, result: AnalysisResult, report_language: str) -> List[str]:
         signal_text, signal_emoji, _ = self._get_signal_level(result)
         dashboard = result.dashboard if hasattr(result, "dashboard") and result.dashboard else {}
@@ -463,10 +468,34 @@ class NotificationService(
             ("仓位建议", "；".join(position_items)[:260]),
         ]
 
-        lines = [f"## {signal_emoji} {stock_name} ({result.code})"]
-        for label, value in fields:
-            lines.append(f"- {label}：{value or '暂无'}")
-        lines.extend(["", "---", ""])
+        values = {label: value for label, value in fields}
+        score = values.get("股票评分") or "暂无"
+        trend = values.get("趋势判断") or "暂无"
+        advice = values.get("操作建议") or "暂无"
+
+        lines = [
+            f"## {signal_emoji} {stock_name} ({result.code})",
+            f"股票评分：{score}｜趋势判断：{trend}｜操作建议：{advice}",
+            "",
+            "**AI 决策**",
+            self._stock_push_line("AI 决策信号", values.get("AI 决策信号")),
+            self._stock_push_line("观察条件", values.get("观察条件")),
+            "",
+            "**消息面**",
+            self._stock_push_line("舆情情绪", values.get("舆情情绪")),
+            self._stock_push_line("业绩预期", values.get("业绩预期")),
+            self._stock_push_line("利好催化", values.get("利好催化")),
+            self._stock_push_line("最新动态", values.get("最新动态")),
+            "",
+            "**风控**",
+            self._stock_push_line("风险提示", values.get("风险提示")),
+            self._stock_push_line("止损位", values.get("止损位")),
+            self._stock_push_line("目标位", values.get("目标位")),
+            self._stock_push_line("仓位建议", values.get("仓位建议")),
+            "",
+            "---",
+            "",
+        ]
         return lines
 
     def generate_stock_only_report(
@@ -487,9 +516,9 @@ class NotificationService(
         hold_count = sum(1 for r in results if getattr(r, "decision_type", "") in ("hold", ""))
 
         lines = [
-            f"# 🎯 {report_date} 个股信息推送",
+            f"# 🎯 个股信息推送｜{report_date}",
             "",
-            f"> 共分析 **{len(results)}** 只股票 | 买入:{buy_count} 观望:{hold_count} 卖出:{sell_count}",
+            f"> 共 {len(results)} 只｜买入 {buy_count}｜观望 {hold_count}｜卖出 {sell_count}",
             "",
         ]
         for result in sorted_results:
